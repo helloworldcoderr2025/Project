@@ -1,0 +1,65 @@
+{% load static %}
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Manage Table Upload</title>
+  <script src="{% static 'js/Edit_page.js' %}"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+  <a href="/">← Back to Home</a>
+  <h2>Upload & Manage Table</h2>
+
+  {% if messages %}
+    <ul>
+      {% for message in messages %}
+        <li>{{ message }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+
+    <label for="table_name">Select Table:</label><br>
+    <select id="table_name" name="table_name" onchange="display_table()" required>
+      <option value="" disabled selected>-- Select Table --</option>
+      {% for table in list_of_tables %}
+        <option value="{{ table }}">{{ table }}</option>
+      {% endfor %}
+    </select><br><br>
+
+    <div id="preview_table">
+      <!-- Table will be previewed here !! -->
+    </div><br>
+
+    <label for="file">Upload the new CSV or Excel File:</label><br>
+    <input type="file" id="file" name="file" accept=".csv, .xls, .xlsx" onchange="display_uploaded_table()" required><br><br>
+
+    <p>Uploaded File Preview</p>
+    <div id="preview_uploaded_table">
+      <!-- Uploaded Table will be previewed here !! -->
+    </div><br>  
+
+    <label for="mode">Choose Operation Mode:</label><br>
+    <select name="mode" id="mode" required>
+      <option value="" disabled selected>-- Select --</option>
+      <option value="recreate">Recreate the Table</option>
+      <option value="add_columns">Add New Columns with Data</option>
+      <option value="del_columns">Delete non-Existing Columns</option>
+      <option value="add_data">Add Data to Existing Data</option>
+      <option value="overwrite">Overwrite Data Completely</option>
+    </select><br><br>
+
+    <button type="submit" name="action" value="submit">Submit</button>
+  </form>
+
+  
+  
+
+</body>
+</html>

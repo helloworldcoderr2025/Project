@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Table Operations</title>
+</head>
+<body>
+    <h1>Table Operations</h1>
+    
+    {% if messages %}
+    <div>
+        {% for message in messages %}
+        <div>{{ message }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <form method="post" id="table-operations-form">
+        {% csrf_token %}
+        
+        <div>
+            <label>Select Table:</label>
+            <select name="table_name" id="table-select" required>
+                <option value="" disabled selected>Select a table</option>
+                {% for table in list_of_tables %}
+                    <option value="{{ table }}" {% if selected_table == table %}selected{% endif %}>{{ table }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        {% if not search_results %}
+        <div>
+            <label>Select Operation:</label>
+            <select name="operation" id="operation-select" required>
+                <option value="" disabled selected>Select an operation</option>
+                <option value="delete_column">Delete Column</option>
+                <option value="delete_row">Delete Row</option>
+                <option value="add_column">Add Column</option>
+                <option value="add_row">Add Row</option>
+                <option value="search_records">Update Record</option>
+            </select>
+        </div>
+
+        <div id="operation-fields">
+            <!-- Dynamic fields will be inserted here based on operation selection -->
+        </div>
+        
+        <div id="row-preview" style="display:none;">
+            <h3>Row Preview</h3>
+            <table id="preview-table">
+                <thead>
+                    <tr id="preview-headers"></tr>
+                </thead>
+                <tbody>
+                    <tr id="preview-data"></tr>
+                </tbody>
+            </table>
+            <button type="submit" id="confirm-delete" style="display:none;">Confirm Delete</button>
+        </div>
+        
+        <button type="submit" id="main-submit">Next</button>
+        {% endif %}
+
+        {% if search_results %}
+        <input type="hidden" name="operation" value="update_record">
+        <input type="hidden" name="table_name" value="{{ selected_table }}">
+        
+        <h2>Select Record to Update</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Select</th>
+                    {% for col in columns %}
+                    <th>{{ col }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in search_results %}
+                <tr>
+                    <td><input type="radio" name="record_id" value="{{ row.0 }}" required></td>
+                    {% for value in row %}
+                    <td>{{ value }}</td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <h2>Update Fields</h2>
+        {% for col in columns %}
+        <div>
+            <label>{{ col }}:</label>
+            <input type="text" name="update_{{ col }}" placeholder="Leave blank to keep current value">
+        </div>
+        {% endfor %}
+        
+        <button type="submit">Update Selected Record</button>
+        {% endif %}
+    </form>
+
+    <script>
+        const rowPreview = document.getElementById('row-preview');
+        const confirmDelete = document.getElementById('confirm-delete');
+        const mainSubmit = document.getElementById('main-submit');
+        
+        document.getElementById('operation-select').addEventListener('change', function() {
+            const operation = this.value;
+            const tableSelect = document.getElementById('table-select');
+            const fieldsContainer = document.getElementById('operation-fields');
+            
+            
+            fieldsContainer.innerHTML = '';
+            rowPreview.style.display = 'none';
+            confirmDelete.style.display = 'none';
+            if (mainSubmit) mainSubmit.style.display = 'block';
+            
+            if (!operation || !tableSelect.value) return;
+            
+            switch(operation) {
+                case 'delete_column':
+                    fetch(`/get-table-columns/?table_name=${tableSelect.value}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            let html = '<div><label>Select Column to Delete:</label>';
+                            html += '<select name="column_name" required>';
+                            data.columns.forEach(col => {
+                                html += `<option value="${col}">${col}</option>`;
+                            });
+                            html += '</select></div>';
+                            fieldsContainer.innerHTML = html;
+                        });
+                    break;
+                    
+                case 'delete_row':
+                    fetch(`/get-row-ids/?table_name=${tableSelect.value}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.error) {
+                                fieldsContainer.innerHTML = `<div class="error">${data.error}</div>`;
+                                return;
+                            }
+
+                            let html = '<div><label>Select Row to Delete:</label>';
+                            html += '<select name="row_id" id="row-select" required>';
+                            html += '<option value="" disabled selected>Select a row</option>';
+                            
+                            data.row_ids.forEach(id => {
+                                html += `<option value="${id}">${id}</option>`;
+                            });
+                            
+                            html += '</select>';
+                            html += `<input type="hidden" name="pk_column" value="${data.pk_column}">`;
+                            html += '</div>';
+                            
+                            fieldsContainer.innerHTML = html;
+
+                            
+                            document.getElementById('row-select').addEventListener('change', function() {
+                                const rowId = this.value;
+                                const pkColumn = document.querySelector('input[name="pk_column"]').value;
+                                
+                                if (rowId) {
+                                    fetch(`/get-row-data/?table_name=${tableSelect.value}&row_id=${rowId}&pk_column=${pkColumn}`)
+                                        .then(response => response.json())
+                                        .then(rowData => {
+                                            if (rowData.error) {
+                                                document.getElementById('preview-headers').innerHTML = 
+                                                    `<th colspan="2">${rowData.error}</th>`;
+                                                document.getElementById('preview-data').innerHTML = '';
+                                                rowPreview.style.display = 'block';
+                                                confirmDelete.style.display = 'none';
+                                                return;
+                                            }
+
+                                            const headersContainer = document.getElementById('preview-headers');
+                                            const dataContainer = document.getElementById('preview-data');
+                                            
+                                            headersContainer.innerHTML = '';
+                                            dataContainer.innerHTML = '';
+                                            
+                                            // Create header row
+                                            headersContainer.innerHTML = '<th>Column</th><th>Value</th>';
+                                            
+                                            // Create data rows
+                                            for (const [key, value] of Object.entries(rowData)) {
+                                                dataContainer.innerHTML += `
+                                                    <tr>
+                                                        <td>${key}</td>
+                                                        <td>${value !== null ? value : 'NULL'}</td>
+                                                    </tr>
+                                                `;
+                                            }
+                                            
+                                            // Show preview and confirm button
+                                            rowPreview.style.display = 'block';
+                                            confirmDelete.style.display = 'block';
+                                            
+                                            // Hide the main submit button
+                                            if (mainSubmit) mainSubmit.style.display = 'none';
+                                        })
+                                        .catch(error => {
+                                            document.getElementById('preview-headers').innerHTML = 
+                                                `<th colspan="2">Error loading row data</th>`;
+                                            document.getElementById('preview-data').innerHTML = '';
+                                            rowPreview.style.display = 'block';
+                                            confirmDelete.style.display = 'none';
+                                        });
+                                } else {
+                                    // Hide preview if no row selected
+                                    rowPreview.style.display = 'none';
+                                    confirmDelete.style.display = 'none';
+                                    if (mainSubmit) mainSubmit.style.display = 'block';
+                                }
+                            });
+                        })
+                        .catch(error => {
+                            fieldsContainer.innerHTML = `
+                                <div class="error">Error loading row IDs: ${error.message}</div>
+                            `;
+                        });
+                    break;
+                    
+                case 'add_column':
+                    fieldsContainer.innerHTML = `
+                        <div>
+                            <label>New Column Name:</label>
+                            <input type="text" name="column_name" required>
+                        </div>
+                        <div>
+                            <label>Data Type:</label>
+                            <select name="data_type" required>
+                                <option value="text">Text</option>
+                                <option value="integer">Integer</option>
+                                <option value="boolean">Boolean</option>
+                                <option value="timestamp">Timestamp</option>
+                            </select>
+                        </div>
+                    `;
+                    break;
+                    
+                case 'add_row':
+                    fetch(`/get-table-columns/?table_name=${tableSelect.value}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            let html = '<div><h3>Enter New Row Data:</h3>';
+                            data.columns.forEach(col => {
+                                html += `
+                                    <div>
+                                        <label>${col}:</label>
+                                        <input type="text" name="${col}">
+                                    </div>
+                                `;
+                            });
+                            html += '</div>';
+                            fieldsContainer.innerHTML = html;
+                        });
+                    break;
+                    
+                case 'search_records':
+                    fieldsContainer.innerHTML = `
+                        <div>
+                            <h3>Search for Records to Update</h3>
+                            <p>Enter any field values to find matching records</p>
+                            <div id="search-fields"></div>
+                        </div>
+                    `;
+                    
+                    fetch(`/get-table-columns/?table_name=${tableSelect.value}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            let html = '';
+                            data.columns.forEach(col => {
+                                html += `
+                                    <div>
+                                        <label>${col}:</label>
+                                        <input type="text" name="${col}">
+                                    </div>
+                                `;
+                            });
+                            document.getElementById('search-fields').innerHTML = html;
+                        });
+                    break;
+            }
+        });
+    </script>
+</body>
+</html>
