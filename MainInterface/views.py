@@ -1,4 +1,5 @@
 from django.shortcuts import render,redirect
+from collections import defaultdict, deque
 from django.contrib import messages
 from django.db import connection
 from django.views.decorators.csrf import csrf_exempt
@@ -298,6 +299,23 @@ def get_all_tables_view(request):
 
 
 
+def restore_type_and_cast(val):
+    """Restore Python type and provide corresponding SQL CAST type."""
+    if val is None:
+        return None, None
+    try:
+        int_val = int(val)
+        return int_val, 'INTEGER'
+    except (ValueError, TypeError):
+        pass
+    try:
+        float_val = float(val)
+        return float_val, 'REAL'
+    except (ValueError, TypeError):
+        pass
+    if isinstance(val, str) and val.lower() in ['true', 'false']:
+        return val.lower() == 'true', 'BOOLEAN'
+    return val, None  # Treat as TEXT
 
 @csrf_exempt
 def submit_query_view(request):
@@ -314,75 +332,91 @@ def submit_query_view(request):
         if not tables:
             return JsonResponse({'error': 'No tables selected'}, status=400)
 
-        # The "base" table is the first in the tables list
         base_table = tables[0]
 
-        # Build SELECT columns string (with table prefix)
+        # SELECT clause
         select_cols = []
         for table in tables:
-            cols = output_columns.get(table, [])
-            for col in cols:
+            for col in output_columns.get(table, []):
                 select_cols.append(f"{table}.{col}")
+        select_cols_str = ', '.join(select_cols) if select_cols else '*'
 
-        select_cols_str = ', '.join(select_cols)
-
-        # Start query with base table
-        query = f"SELECT {select_cols_str} FROM {base_table}"
-
-        # Add JOIN clauses
+        # JOIN graph construction
+        join_graph = defaultdict(list)
+        join_map = {}
         for join in joins:
-            t1 = join.get('table1')
-            c1 = join.get('column1')
-            t2 = join.get('table2')
-            c2 = join.get('column2')
-            jtype = join.get('joinType', 'INNER').upper()
+            t1, t2 = join['table1'], join['table2']
+            join_graph[t1].append((t2, join))
+            join_graph[t2].append((t1, join))
+            join_map[(t1, t2)] = join
+            join_map[(t2, t1)] = join  # Bi-directional
 
-            # Only add join if info is complete
-            if t1 and c1 and t2 and c2:
-                # For safety, validate jtype is one of allowed join types:
+        # BFS to determine join order
+        visited = set()
+        queue = deque([base_table])
+        visited.add(base_table)
+        join_clauses = []
+
+        while queue:
+            current = queue.popleft()
+            for neighbor, join in join_graph[current]:
+                if neighbor in visited:
+                    continue
+
+                jtype = join.get('joinType', 'INNER').upper()
                 if jtype not in ('INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS'):
                     jtype = 'INNER'
 
-                query += f" {jtype} JOIN {t2} ON {t1}.{c1} = {t2}.{c2}"
+                t1, c1 = join['table1'], join['column1']
+                t2, c2 = join['table2'], join['column2']
 
-        # Add WHERE clause similar to before
-        if conditions:
-            where_clauses = []
-            for cond in conditions:
-                col = cond.get('column')
-                op = cond.get('operator', '=')
-                val = cond.get('value')
-                table_for_col = cond.get('table')  # Make sure you include table name in condition in payload
-
-                if not table_for_col:
-                    table_for_col = base_table
-
-                # NULL handling
-                if val is None:
-                    if op.strip() == '=':
-                        where_clauses.append(f"{table_for_col}.{col} IS NULL")
-                    elif op.strip() == '!=' or op.strip().upper() == '<>':
-                        where_clauses.append(f"{table_for_col}.{col} IS NOT NULL")
-                    else:
-                        continue
+                # Direction matters: make sure the base is already visited
+                if current == t1:
+                    clause = f"{jtype} JOIN {t2} ON {t1}.{c1} = {t2}.{c2}"
                 else:
-                    if isinstance(val, str):
-                        val = val.replace("'", "''")
-                        val = f"'{val}'"
-                    else:
-                        val = str(val)
+                    clause = f"{jtype} JOIN {t1} ON {t2}.{c2} = {t1}.{c1}"
 
-                    where_clauses.append(f"{table_for_col}.{col} {op} {val}")
+                join_clauses.append(clause)
+                queue.append(neighbor)
+                visited.add(neighbor)
 
-            if where_clauses:
-                where_str = " AND ".join(where_clauses)
-                query += f" WHERE {where_str}"
+        # Construct final query
+        query = f"SELECT {select_cols_str} FROM {base_table} " + " ".join(join_clauses)
 
-        print("Final SQL Query with joins:", query)
+        # WHERE clause
+        where_clauses = []
+        query_params = []
 
+        for cond in conditions:
+            col = cond.get('column')
+            op = cond.get('operator', '=').strip()
+            val = cond.get('value')
+            table_for_col = cond.get('table') or base_table
+
+            if val in (None, 'null', 'None'):
+                if op == '=':
+                    where_clauses.append(f"{table_for_col}.{col} IS NULL")
+                elif op in ('!=', '<>'):
+                    where_clauses.append(f"{table_for_col}.{col} IS NOT NULL")
+                continue
+
+            restored_val, cast_type = restore_type_and_cast(val)
+            col_expr = f"CAST({table_for_col}.{col} AS {cast_type})" if cast_type else f"{table_for_col}.{col}"
+
+            if op not in ('=', '!=', '<>', '>', '<', '>=', '<='):
+                op = '='
+
+            where_clauses.append(f"{col_expr} {op} %s")
+            query_params.append(restored_val)
+
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+
+        print("Final SQL Query:", query)
+        print("With Params:", query_params)
 
         with connection.cursor() as cursor:
-            cursor.execute(query)
+            cursor.execute(query, query_params)
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
 
@@ -393,8 +427,6 @@ def submit_query_view(request):
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
-
 
 
 
